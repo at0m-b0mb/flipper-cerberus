@@ -1,7 +1,9 @@
 #include "cerberus_subghz.h"
 
 #include <furi_hal.h>
-#include <furi_hal_subghz.h>
+#include <furi_hal_subghz.h> // FuriHalSubGhzPreset enum + valid-range helpers
+#include <lib/subghz/devices/devices.h>
+#include <lib/subghz/devices/cc1101_int/cc1101_int_interconnect.h>
 
 #define TAG "Cerberus"
 
@@ -35,20 +37,23 @@ static uint8_t cerberus_next_band(uint8_t band) {
     return (uint8_t)((band + 1) % CERBERUS_BAND_COUNT);
 }
 
-static void cerberus_tune(uint8_t band) {
-    furi_hal_subghz_idle();
-    furi_hal_subghz_set_frequency_and_path(cerberus_bands[band].frequency);
-    furi_hal_subghz_flush_rx();
-    furi_hal_subghz_rx();
+static void cerberus_tune(const SubGhzDevice* device, uint8_t band) {
+    subghz_devices_idle(device);
+    subghz_devices_set_frequency(device, cerberus_bands[band].frequency);
+    subghz_devices_flush_rx(device);
+    subghz_devices_set_rx(device);
     furi_delay_us(CERBERUS_SETTLE_US);
 }
 
 static int32_t cerberus_subghz_thread(void* context) {
     CerberusSubGhz* worker = context;
 
-    // --- Bring the radio up in a wide OOK receive mode (energy detection) ---
-    furi_hal_subghz_reset();
-    furi_hal_subghz_load_preset(FuriHalSubGhzPresetOok650Async);
+    // --- Bring the internal CC1101 up in a wide OOK receive mode ---
+    subghz_devices_init();
+    const SubGhzDevice* device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
+    subghz_devices_begin(device);
+    subghz_devices_reset(device);
+    subghz_devices_load_preset(device, FuriHalSubGhzPresetOok650Async, NULL);
 
     const uint32_t start_tick = furi_get_tick();
     uint8_t current_band = 0xFF; // force an initial tune
@@ -81,15 +86,15 @@ static int32_t cerberus_subghz_thread(void* context) {
 
         // --- Retune only when the target band changes ---
         if(active != current_band) {
-            if(furi_hal_subghz_is_frequency_valid(cerberus_bands[active].frequency)) {
-                cerberus_tune(active);
+            if(subghz_devices_is_frequency_valid(device, cerberus_bands[active].frequency)) {
+                cerberus_tune(device, active);
             }
             current_band = active;
         }
 
         // --- Sample + detect ---
         uint32_t now = furi_get_tick();
-        float rssi = furi_hal_subghz_get_rssi();
+        float rssi = subghz_devices_get_rssi(device);
 
         CerberusThreat raised = cerberus_detector_feed(
             &worker->det[active],
@@ -132,8 +137,10 @@ static int32_t cerberus_subghz_thread(void* context) {
         furi_delay_us(CERBERUS_SAMPLE_US);
     }
 
-    furi_hal_subghz_idle();
-    furi_hal_subghz_sleep();
+    subghz_devices_idle(device);
+    subghz_devices_sleep(device);
+    subghz_devices_end(device);
+    subghz_devices_deinit();
     return 0;
 }
 
